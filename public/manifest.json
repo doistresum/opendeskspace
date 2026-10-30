@@ -1,6 +1,6 @@
 {
-  "name": "DeskLink Viewer - Linux Secondary Display",
-  "short_name": "DeskLink",
+  "name": "Open Deskspace",
+  "short_name": "Open Deskspace",
   "description": "Use your Android tablet or phone as a secondary display for your Linux PC",
   "start_url": "/",
   "display": "standalone",

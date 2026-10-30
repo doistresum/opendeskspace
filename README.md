@@ -1,2 +1,2 @@
-# linspacedesk
-Linux Spacedesk Alternative
+# Open Deskspace
+Linux second monitor for a phone or tablet.

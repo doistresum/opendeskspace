@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ConnectionPage from './components/ConnectionPage';
 import DisplayViewer from './components/DisplayViewer';
 import Dashboard from './components/Dashboard';
 import ServerSetup from './components/ServerSetup';
 import Settings from './components/Settings';
 import TabletViewer from './components/TabletViewer';
+import { DeskLinkClient, LiveState, ServerStatus, fetchStatus } from './lib/session';
 
 export type AppView = 'dashboard' | 'connect' | 'viewer' | 'setup' | 'settings' | 'tablet';
 
@@ -16,83 +17,105 @@ export interface ConnectionConfig {
   fps: number;
   touchEnabled: boolean;
   autoReconnect: boolean;
+  keyboardEnabled: boolean;
+  audioEnabled: boolean;
 }
 
-export interface DisplayInfo {
-  connected: boolean;
-  hostIP: string;
-  resolution: string;
-  fps: number;
-  latency: number;
-  bandwidth: number;
-}
-
-function App() {
-  const [currentView, setCurrentView] = useState<AppView>('dashboard');
-  const [config, setConfig] = useState<ConnectionConfig>({
-    hostIP: '192.168.1.100',
+const storedConfig = (): ConnectionConfig => {
+  const fallback: ConnectionConfig = {
+    hostIP: '',
     port: 9090,
     resolution: '1920x1080',
     quality: 'high',
     fps: 30,
     touchEnabled: true,
     autoReconnect: true,
-  });
-  const [displayInfo, setDisplayInfo] = useState<DisplayInfo>({
-    connected: false,
-    hostIP: '',
-    resolution: '',
-    fps: 0,
-    latency: 0,
-    bandwidth: 0,
-  });
-
-  const handleConnect = (ip: string, port: number) => {
-    setConfig(prev => ({ ...prev, hostIP: ip, port }));
-    setDisplayInfo({
-      connected: true,
-      hostIP: ip,
-      resolution: config.resolution,
-      fps: config.fps,
-      latency: Math.floor(Math.random() * 20) + 5,
-      bandwidth: Math.floor(Math.random() * 50) + 30,
-    });
-    setCurrentView('viewer');
+    keyboardEnabled: true,
+    audioEnabled: true,
   };
+  try {
+    const raw = localStorage.getItem('desklink-config');
+    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
+  } catch {
+    return fallback;
+  }
+};
 
-  const handleDisconnect = () => {
-    setDisplayInfo(prev => ({ ...prev, connected: false }));
-    setCurrentView('dashboard');
-  };
+function App() {
+  const clientRef = useRef<DeskLinkClient | null>(null);
+  if (!clientRef.current) clientRef.current = new DeskLinkClient();
+  const client = clientRef.current;
+  const [currentView, setCurrentView] = useState<AppView>('dashboard');
+  const [config, setConfig] = useState<ConnectionConfig>(storedConfig);
+  const [server, setServer] = useState<ServerStatus | null>(null);
+  const [live, setLive] = useState<LiveState>(client.state);
+  const autoStarted = useRef(false);
 
-  const handleStartDemo = () => {
-    setDisplayInfo({
-      connected: true,
-      hostIP: '127.0.0.1 (Demo)',
-      resolution: config.resolution,
-      fps: config.fps,
-      latency: Math.floor(Math.random() * 10) + 2,
-      bandwidth: Math.floor(Math.random() * 30) + 60,
-    });
-    setCurrentView('viewer');
-  };
+  useEffect(() => client.subscribe(setLive), [client]);
 
-  // Simulate live stats updates
   useEffect(() => {
-    if (!displayInfo.connected) return;
-    const interval = setInterval(() => {
-      setDisplayInfo(prev => ({
-        ...prev,
-        latency: Math.max(1, prev.latency + Math.floor(Math.random() * 6) - 3),
-        bandwidth: Math.max(10, prev.bandwidth + Math.floor(Math.random() * 10) - 5),
-      }));
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [displayInfo.connected]);
+    client.autoReconnect = config.autoReconnect;
+    client.touchEnabled = config.touchEnabled;
+    client.audioEnabled = config.audioEnabled;
+    localStorage.setItem('desklink-config', JSON.stringify(config));
+  }, [client, config]);
+
+  useEffect(() => {
+    let stop = false;
+    const tick = async () => {
+      const status = await fetchStatus();
+      if (!stop) setServer(status);
+    };
+    tick();
+    const id = window.setInterval(tick, 2000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!server) return;
+    setConfig((prev) => ({
+      ...prev,
+      resolution: server.config.resolution || prev.resolution,
+      fps: server.config.fps || prev.fps,
+      quality: server.config.quality || prev.quality,
+      touchEnabled: server.config.touchEnabled,
+      keyboardEnabled: server.config.keyboardEnabled,
+      audioEnabled: server.config.audioEnabled,
+      port: server.port || prev.port,
+    }));
+  }, [server?.config.resolution, server?.config.fps, server?.config.quality, server?.port]);
+
+  useEffect(() => {
+    const requested = new URLSearchParams(location.search).get('view');
+    if (requested === 'connect' || requested === 'setup' || requested === 'settings' || requested === 'tablet' || requested === 'dashboard') {
+      setCurrentView(requested);
+    }
+    if (requested !== 'viewer' || !server || autoStarted.current) return;
+    if (server.passwordRequired) {
+      setCurrentView('connect');
+      return;
+    }
+    autoStarted.current = true;
+    setCurrentView('viewer');
+    client.connect(location.hostname, Number(location.port || server.port), '');
+  }, [client, server]);
+
+  const connectTo = (ip: string, port: number, password = '') => {
+    setConfig((prev) => ({ ...prev, hostIP: ip, port }));
+    setCurrentView('viewer');
+    client.connect(ip, port, password);
+  };
+
+  const connectHere = () => {
+    const port = Number(location.port || server?.port || config.port);
+    connectTo(location.hostname, port, '');
+  };
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">
-      {/* Navigation */}
       <nav className="bg-gray-800/80 backdrop-blur-md border-b border-gray-700 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
@@ -101,109 +124,55 @@ function App() {
                 <i className="fas fa-desktop text-white text-sm"></i>
               </div>
               <span className="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-                DeskLink
+                Open Deskspace
               </span>
               <span className="text-xs text-gray-400 ml-1 hidden sm:inline">for Linux</span>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => setCurrentView('dashboard')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${
-                  currentView === 'dashboard'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-300 hover:bg-gray-700'
-                }`}
-              >
-                <i className="fas fa-home mr-1.5"></i>Dashboard
-              </button>
-              <button
-                onClick={() => setCurrentView('connect')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${
-                  currentView === 'connect'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-300 hover:bg-gray-700'
-                }`}
-              >
-                <i className="fas fa-plug mr-1.5"></i>Connect
-              </button>
-              <button
-                onClick={() => setCurrentView('setup')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${
-                  currentView === 'setup'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-300 hover:bg-gray-700'
-                }`}
-              >
-                <i className="fas fa-server mr-1.5"></i>Server
-              </button>
-              <button
-                onClick={() => setCurrentView('tablet')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${
-                  currentView === 'tablet'
-                    ? 'bg-teal-600 text-white'
-                    : 'text-gray-300 hover:bg-gray-700'
-                }`}
-              >
-                <i className="fas fa-tablet-alt mr-1.5"></i>Tablet
-              </button>
-              <button
-                onClick={() => setCurrentView('settings')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${
-                  currentView === 'settings'
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-300 hover:bg-gray-700'
-                }`}
-              >
-                <i className="fas fa-cog mr-1.5"></i>Settings
-              </button>
+              {([
+                ['dashboard', 'fas fa-home', 'Dashboard'],
+                ['connect', 'fas fa-plug', 'Connect'],
+                ['setup', 'fas fa-server', 'Server'],
+                ['tablet', 'fas fa-tablet-alt', 'Tablet'],
+                ['settings', 'fas fa-cog', 'Settings'],
+              ] as const).map(([view, icon, label]) => (
+                <button
+                  key={view}
+                  onClick={() => setCurrentView(view)}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                    currentView === view
+                      ? view === 'tablet' ? 'bg-teal-600 text-white' : 'bg-blue-600 text-white'
+                      : 'text-gray-300 hover:bg-gray-700'
+                  }`}
+                >
+                  <i className={`${icon} mr-1.5`}></i>{label}
+                </button>
+              ))}
             </div>
           </div>
         </div>
       </nav>
 
-      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {currentView === 'dashboard' && (
           <Dashboard
-            displayInfo={displayInfo}
+            server={server}
+            live={live}
             onConnect={() => setCurrentView('connect')}
+            onUseThisPc={connectHere}
             onViewDisplay={() => setCurrentView('viewer')}
-            onDemo={handleStartDemo}
             onTablet={() => setCurrentView('tablet')}
           />
         )}
         {currentView === 'connect' && (
-          <ConnectionPage
-            config={config}
-            onConnect={handleConnect}
-            onDemo={handleStartDemo}
-          />
+          <ConnectionPage config={config} server={server} onConnect={connectTo} onUseThisPc={connectHere} />
         )}
         {currentView === 'viewer' && (
-          <DisplayViewer
-            displayInfo={displayInfo}
-            config={config}
-            onDisconnect={handleDisconnect}
-          />
+          <DisplayViewer client={client} live={live} onDisconnect={() => { client.disconnect(); setCurrentView('dashboard'); }} />
         )}
-        {currentView === 'setup' && <ServerSetup />}
-        {currentView === 'settings' && (
-          <Settings config={config} setConfig={setConfig} />
-        )}
-        {currentView === 'tablet' && (
-          <TabletViewer onConnectFromTablet={(ip, port) => {
-            setConfig(prev => ({ ...prev, hostIP: ip, port }));
-            setDisplayInfo({
-              connected: true,
-              hostIP: ip,
-              resolution: config.resolution,
-              fps: config.fps,
-              latency: Math.floor(Math.random() * 15) + 5,
-              bandwidth: Math.floor(Math.random() * 40) + 40,
-            });
-            setCurrentView('viewer');
-          }} />
-        )}
+        {currentView === 'setup' && <ServerSetup server={server} />}
+        {currentView === 'settings' && <Settings config={config} setConfig={setConfig} server={server} />}
+        {currentView === 'tablet' && <TabletViewer server={server} onConnect={connectTo} />}
       </main>
     </div>
   );
